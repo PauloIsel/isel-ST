@@ -1,0 +1,7 @@
+﻿  Exemplo ST.cpp
+  _WIN32_WINNT not defined. Defaulting to _WIN32_WINNT_MAXVER (see WinSDKVer.h)
+C:\Users\nunoj\OneDrive - Instituto Superior de Engenharia de Lisboa\_ISEL\Aulas\Shared ST\21_22\Trabalho\Exemplo ST\Exemplo ST\Exemplo ST.cpp(170,16): warning C4244: 'return': conversion from 'float' to 'int', possible loss of data
+C:\Users\nunoj\OneDrive - Instituto Superior de Engenharia de Lisboa\_ISEL\Aulas\Shared ST\21_22\Trabalho\Exemplo ST\Exemplo ST\Exemplo ST.cpp(195,51): warning C4244: 'argument': conversion from 'double' to 'float', possible loss of data
+C:\Users\nunoj\OneDrive - Instituto Superior de Engenharia de Lisboa\_ISEL\Aulas\Shared ST\21_22\Trabalho\Exemplo ST\Exemplo ST\Exemplo ST.cpp(202,67): warning C4244: 'argument': conversion from 'double' to 'float', possible loss of data
+C:\Users\nunoj\OneDrive - Instituto Superior de Engenharia de Lisboa\_ISEL\Aulas\Shared ST\21_22\Trabalho\Exemplo ST\Exemplo ST\Exemplo ST.cpp(207,41): warning C4244: 'argument': conversion from 'double' to 'float', possible loss of data
+  Exemplo ST.vcxproj -> C:\Users\nunoj\OneDrive - Instituto Superior de Engenharia de Lisboa\_ISEL\Aulas\Shared ST\21_22\Trabalho\Exemplo ST\Debug\Exemplo ST.exe
