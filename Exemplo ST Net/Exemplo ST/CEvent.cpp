@@ -1,3 +1,5 @@
+#include <cassert>
+#include <cstddef>
 #include "CEvent.h"
 
 CEvent::CEvent(double time, EventType type, void* pData)
@@ -17,23 +19,27 @@ CEventManager::CEventManager()
 
 void CEventManager::Reset()
 {
-	while (m_eventList.IsEmpty() == false)
-		delete m_eventList.RemoveHead();
+	while (!m_eventList.empty())
+	{
+		delete m_eventList.front();
+		m_eventList.pop_front();
+	}
 
 	m_Tmin = m_Tmax = 0;
 	for (int i = 0; i < ArraySize; i++)
-		m_positionArray[i] = NULL;
+		m_positionArray[i] = m_eventList.end();
 }
 
 
 CEvent* CEventManager::NextEvent()
 {
-	CEvent* pEvent = m_eventList.GetHead();
-	ASSERT(pEvent->m_arrayPos >= 0 && pEvent->m_arrayPos < ArraySize);
-	if (m_positionArray[pEvent->m_arrayPos] == m_eventList.GetHeadPosition())
-		m_positionArray[pEvent->m_arrayPos] = NULL;
+	CEvent* pEvent = m_eventList.front();
+	assert(pEvent->m_arrayPos >= 0 && pEvent->m_arrayPos < ArraySize);
+	if (m_positionArray[pEvent->m_arrayPos] == m_eventList.begin())
+		m_positionArray[pEvent->m_arrayPos] = m_eventList.end();
 
-	return m_eventList.RemoveHead();
+	m_eventList.pop_front();
+	return pEvent;
 }
 
 
@@ -43,71 +49,88 @@ void CEventManager::AddEvent(CEvent* pEvent)
 	POSITION searchPos, aux;
 	int arrayIndex;
 
-	if (m_eventList.IsEmpty())
+	if (m_eventList.empty())
 	{
-		m_eventList.AddHead(pEvent);
+		m_eventList.push_front(pEvent);
 		pEvent->m_arrayPos = 0;
 		return;
 	}
 
-	m_Tmin = (m_eventList.GetHead())->m_time;
+	m_Tmin = m_eventList.front()->m_time;
 
 	if (pEvent->m_time < m_Tmin)
 	{
 		m_Tmin = pEvent->m_time;
 		arrayIndex = 0;
-		m_positionArray[arrayIndex] = m_eventList.GetHeadPosition();
+		m_positionArray[arrayIndex] = m_eventList.begin();
 	}
 	else if (pEvent->m_time > m_Tmax)
 	{
 		m_Tmax = pEvent->m_time;
 		arrayIndex = ArraySize - 1;
-		m_positionArray[arrayIndex] = m_eventList.GetTailPosition();
+		auto lastPos = m_eventList.end();
+		--lastPos;
+		m_positionArray[arrayIndex] = lastPos;
 	}
 	else
 	{
 		arrayIndex = (int)((pEvent->m_time - m_Tmin) * (ArraySize - 1) / (m_Tmax - m_Tmin));
-		ASSERT(arrayIndex >= 0 && arrayIndex < ArraySize);
+		assert(arrayIndex >= 0 && arrayIndex < ArraySize);
 	};
 
-	if (m_positionArray[arrayIndex] == NULL)
+	if (m_positionArray[arrayIndex] == m_eventList.end())
 	{
 		if (((float)arrayIndex) / ((float)ArraySize) > 0.5)
-			searchPos = m_eventList.GetTailPosition();
+		{
+			searchPos = m_eventList.end();
+			--searchPos;
+		}
 		else
-			searchPos = m_eventList.GetHeadPosition();
+			searchPos = m_eventList.begin();
 	}
 	else
 		searchPos = m_positionArray[arrayIndex];
 
-	CEvent* ev = m_eventList.GetAt(searchPos);
+	CEvent* ev = *searchPos;
 	if (ev->m_time >= pEvent->m_time) { //reverse search
-		m_eventList.GetPrev(searchPos);
-		while (searchPos) {
+		if (searchPos != m_eventList.begin())
+			--searchPos;
+		
+		while (searchPos != m_eventList.end()) {
 			aux = searchPos;
-			ev = m_eventList.GetPrev(searchPos);
+			ev = *searchPos;
 			if (ev->m_time <= pEvent->m_time) {
-				searchPos = m_eventList.InsertAfter(aux, pEvent);
+				++aux;
+				searchPos = m_eventList.insert(aux, pEvent);
 				break;
 			}
+			if (searchPos == m_eventList.begin())
+			{
+				searchPos = m_eventList.insert(m_eventList.begin(), pEvent);
+				break;
+			}
+			--searchPos;
 			index--;
 		};
-		if (searchPos == NULL)
-			searchPos = m_eventList.AddHead(pEvent);
+		if (searchPos == m_eventList.end())
+			searchPos = m_eventList.insert(m_eventList.begin(), pEvent);
 	}
 	else {							//forward search
-		m_eventList.GetNext(searchPos);
-		while (searchPos) {
+		if (searchPos != m_eventList.end())
+			++searchPos;
+		
+		while (searchPos != m_eventList.end()) {
 			aux = searchPos;
-			ev = m_eventList.GetNext(searchPos);
+			ev = *searchPos;
 			index++;
 			if (ev->m_time >= pEvent->m_time) {
-				searchPos = m_eventList.InsertBefore(aux, pEvent);
+				searchPos = m_eventList.insert(aux, pEvent);
 				break;
 			}
+			++searchPos;
 		}
-		if (searchPos == NULL)
-			searchPos = m_eventList.AddTail(pEvent);
+		if (searchPos == m_eventList.end())
+			searchPos = m_eventList.insert(m_eventList.end(), pEvent);
 	}
 
 	pEvent->m_arrayPos = arrayIndex;
@@ -117,7 +140,8 @@ void CEventManager::AddEvent(CEvent* pEvent)
 
 CEventManager::~CEventManager()
 {
-	while (!m_eventList.IsEmpty()) {
-		delete m_eventList.RemoveHead();
+	while (!m_eventList.empty()) {
+		delete m_eventList.front();
+		m_eventList.pop_front();
 	}
 };

@@ -189,7 +189,7 @@ void Initialize()
     config.simulationTime = 24 * 60 * 60; //24 hours
 
     //state data initialization
-    ZeroMemory(&stateData, sizeof(stateData));
+    memset(&stateData, 0, sizeof(stateData));
 
     //schedule first setup event
     eventManager.AddEvent(new CEvent(expon(3600.0 / config.bhca), SETUP));

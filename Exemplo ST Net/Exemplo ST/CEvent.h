@@ -1,13 +1,12 @@
 #pragma once
 
-#include "afxtempl.h"
+#include <list> // Substitui afxtempl.h para usar std::list
 
 typedef enum
 {
 	SETUP,
 	RELEASE
 } EventType;
-
 
 class CEvent
 {
@@ -27,9 +26,12 @@ public:
 
 const int ArraySize = 1000;
 
+// Definição alternativa para POSITION usando std::list
+typedef std::list<CEvent*>::iterator POSITION;
+
 class CEventManager
 {
-	CList<CEvent*, CEvent*> m_eventList;
+	std::list<CEvent*> m_eventList;
 
 	POSITION m_positionArray[ArraySize];
 	double m_Tmin, m_Tmax;
