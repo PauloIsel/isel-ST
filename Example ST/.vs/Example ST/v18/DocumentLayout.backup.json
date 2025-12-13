@@ -1,14 +1,10 @@
 {
   "Version": 1,
-  "WorkspaceRootPath": "C:\\Users\\Admin\\Desktop\\ST\\Example ST\\",
+  "WorkspaceRootPath": "C:\\Users\\paulo\\Desktop\\isel-ST\\Example ST\\",
   "Documents": [
     {
-      "AbsoluteMoniker": "D:0:0:{595134CF-8C44-4B0E-B304-0A7BEE7F9FC0}|Example ST\\Example ST.vcxproj|C:\\Users\\Admin\\Desktop\\ST\\Example ST\\Example ST\\Example ST.cpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
+      "AbsoluteMoniker": "D:0:0:{595134CF-8C44-4B0E-B304-0A7BEE7F9FC0}|Example ST\\Example ST.vcxproj|C:\\Users\\paulo\\Desktop\\isel-ST\\Example ST\\Example ST\\Example ST.cpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
       "RelativeMoniker": "D:0:0:{595134CF-8C44-4B0E-B304-0A7BEE7F9FC0}|Example ST\\Example ST.vcxproj|solutionrelative:Example ST\\Example ST.cpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
-    },
-    {
-      "AbsoluteMoniker": "D:0:0:{595134CF-8C44-4B0E-B304-0A7BEE7F9FC0}|Example ST\\Example ST.vcxproj|C:\\Users\\Admin\\Desktop\\ST\\Example ST\\Example ST\\CEvent.cpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
-      "RelativeMoniker": "D:0:0:{595134CF-8C44-4B0E-B304-0A7BEE7F9FC0}|Example ST\\Example ST.vcxproj|solutionrelative:Example ST\\CEvent.cpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
     }
   ],
   "DocumentGroupContainers": [
@@ -18,32 +14,32 @@
       "DocumentGroups": [
         {
           "DockedWidth": 200,
-          "SelectedChildIndex": 0,
+          "SelectedChildIndex": 3,
           "Children": [
+            {
+              "$type": "Bookmark",
+              "Name": "ST:128:0:{116d2292-e37d-41cd-a077-ebacac4c8cc4}"
+            },
+            {
+              "$type": "Bookmark",
+              "Name": "ST:0:0:{1c4feeaa-4718-4aa9-859d-94ce25d182ba}"
+            },
+            {
+              "$type": "Bookmark",
+              "Name": "ST:0:0:{40ea2e6b-2121-4bb8-a43e-c83c04b51041}"
+            },
             {
               "$type": "Document",
               "DocumentIndex": 0,
               "Title": "Example ST.cpp",
-              "DocumentMoniker": "C:\\Users\\Admin\\Desktop\\ST\\Example ST\\Example ST\\Example ST.cpp",
+              "DocumentMoniker": "C:\\Users\\paulo\\Desktop\\isel-ST\\Example ST\\Example ST\\Example ST.cpp",
               "RelativeDocumentMoniker": "Example ST\\Example ST.cpp",
-              "ToolTip": "C:\\Users\\Admin\\Desktop\\ST\\Example ST\\Example ST\\Example ST.cpp",
+              "ToolTip": "C:\\Users\\paulo\\Desktop\\isel-ST\\Example ST\\Example ST\\Example ST.cpp",
               "RelativeToolTip": "Example ST\\Example ST.cpp",
-              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAoAAAAAAAAAAAAAAA==",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAACIAAAAJAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000677|",
-              "WhenOpened": "2025-11-21T13:37:14.103Z",
+              "WhenOpened": "2025-12-13T11:05:22.076Z",
               "EditorCaption": ""
-            },
-            {
-              "$type": "Document",
-              "DocumentIndex": 1,
-              "Title": "CEvent.cpp",
-              "DocumentMoniker": "C:\\Users\\Admin\\Desktop\\ST\\Example ST\\Example ST\\CEvent.cpp",
-              "RelativeDocumentMoniker": "Example ST\\CEvent.cpp",
-              "ToolTip": "C:\\Users\\Admin\\Desktop\\ST\\Example ST\\Example ST\\CEvent.cpp",
-              "RelativeToolTip": "Example ST\\CEvent.cpp",
-              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
-              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000677|",
-              "WhenOpened": "2025-11-21T13:37:12.815Z"
             }
           ]
         }
