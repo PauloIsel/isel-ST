@@ -7,6 +7,7 @@
 #include <cstring>
 #include <limits>
 #include <cstdio>
+#include <utility>
 #include "CEvent.h"
 
 CEventManager eventManager;
@@ -70,8 +71,14 @@ public:
         for (int i = 0; i < nLinks; i++) {
             if (outLinks[i].numLines == 0) continue;
             if (outLinks[i].occupiedLines < outLinks[i].numLines) {
-                if (outLinks[i].pNextSwitch != nullptr)
-                    if (!outLinks[i].pNextSwitch->RequestLine(hop + 1, route)) return false;
+                bool ok = true;
+                if (outLinks[i].pNextSwitch != nullptr) {
+                    ok = outLinks[i].pNextSwitch->RequestLine(hop + 1, route);
+                }
+                if (!ok) {
+                    // este ramo não conseguiu alocar recursivamente — tenta a próxima rota
+                    continue;
+                }
                 outLinks[i].occupiedLines++;
                 route[hop] = i;
                 return true;
@@ -111,7 +118,12 @@ struct Config {
 
 struct Metrics {
     long totalCallsServed, totalArrivals, blockedCalls;
-    double avgWaitingAll, avgWaitingWaited, operatorUtil, probWaitGT360, meanQueueSize;
+    double avgWaitingAll, avgWaitingWaited, operatorUtil, probWaitGT360, meanQueueSize, carriedErlangs;
+    double avgOperatorsBusy; // average number of operators busy (operator-seconds / window length)
+    long arrivalsInWindow;
+    long blockedInWindow;
+    long servedInWindow;
+    int maxOperatorsBusy;
 };
 
 struct CallRecord {
@@ -128,6 +140,11 @@ struct RunState {
     int busyOperators;
     std::queue<CallData*> waitingQueue;
     std::vector<CallRecord> callHistory;
+
+    // NEW: record arrival and blocked times and operator usage change events
+    std::vector<double> arrivalTimes;
+    std::vector<double> blockedTimes;
+    std::vector<std::pair<double, int>> operatorUsageEvents; // (time, busyOperators)
 
     RunState() : cfg(), totalCalls(0), blockedCalls(0), servedCallsCount(0), waitedCallsCount(0),
         countWaitGT360(0), carriedServiceTime(0.0), reqServiceTime(0.0),
@@ -163,6 +180,9 @@ static void InitializeRun(RunState& st, const Config& cfg, unsigned int seed) {
     st.busyOperators = st.servedCallsCount = st.waitedCallsCount = st.countWaitGT360 = 0;
     st.cumWaitingTimeAll = st.cumWaitingTimeWaited = st.lastEventTime = st.queueArea = st.cumOperatorBusyTime = 0.0;
     st.callHistory.clear();
+    st.arrivalTimes.clear();
+    st.blockedTimes.clear();
+    st.operatorUsageEvents.clear();
     eventManager.Reset();
     InitNetwork(cfg);
     st.ResetSwitches();
@@ -170,8 +190,16 @@ static void InitializeRun(RunState& st, const Config& cfg, unsigned int seed) {
     eventManager.AddEvent(new CEvent(expon(3600.0f / (float)cfg.bhca), SETUP));
 }
 
+static void RecordOperatorEvent(RunState& st, double time) {
+    // push current busyOperators state at given time
+    st.operatorUsageEvents.push_back(std::make_pair(time, st.busyOperators));
+}
+
 static void SetupRun(RunState& st, CEvent* pEvent) {
     eventManager.AddEvent(new CEvent(pEvent->m_time + expon(3600.0f / (float)st.cfg.bhca), SETUP));
+
+    // record arrival time
+    st.arrivalTimes.push_back(pEvent->m_time);
 
     CallData* pNewCall = new CallData;
     pNewCall->serviceTime = expon((float)st.cfg.holdTime);
@@ -188,6 +216,8 @@ static void SetupRun(RunState& st, CEvent* pEvent) {
         if (st.busyOperators < st.cfg.numOperators) {
             pNewCall->serviceStartTime = pEvent->m_time;
             st.busyOperators++;
+            // record operator usage change
+            RecordOperatorEvent(st, pEvent->m_time);
             st.cumOperatorBusyTime += pNewCall->serviceTime;
             eventManager.AddEvent(new CEvent(pEvent->m_time + pNewCall->serviceTime, RELEASE, pNewCall));
         }
@@ -197,6 +227,7 @@ static void SetupRun(RunState& st, CEvent* pEvent) {
     }
     else {
         st.blockedCalls++;
+        st.blockedTimes.push_back(pEvent->m_time); // record blocked call time
         delete pNewCall;
     }
 }
@@ -209,7 +240,11 @@ static void ReleaseRun(RunState& st, CEvent* pEvent) {
 
     st.carriedServiceTime += (currentTime - pCall->startTime);
 
-    if (st.busyOperators > 0) st.busyOperators--;
+    if (st.busyOperators > 0) {
+        st.busyOperators--;
+        // record operator usage change
+        RecordOperatorEvent(st, currentTime);
+    }
 
     double waiting = 0.0;
     if (pCall->serviceStartTime > 0.0)
@@ -235,6 +270,8 @@ static void ReleaseRun(RunState& st, CEvent* pEvent) {
         pNext->serviceStartTime = currentTime;
 
         st.busyOperators++;
+        // record operator usage change
+        RecordOperatorEvent(st, currentTime);
         st.cumOperatorBusyTime += pNext->serviceTime;
 
         eventManager.AddEvent(new CEvent(currentTime + pNext->serviceTime, RELEASE, pNext));
@@ -264,10 +301,39 @@ static Metrics RunSimulation(const Config& cfg, RunState& st, unsigned int seed)
     m.probWaitGT360 = (m.totalCallsServed > 0) ? (double)st.countWaitGT360 / m.totalCallsServed : 0.0;
     double arrivalsToCC = (double)m.totalCallsServed / cfg.simulationTime;
     m.meanQueueSize = arrivalsToCC * m.avgWaitingAll;
+    // average number of busy operators across the whole simulation (operator-seconds / windowLength)
+    m.avgOperatorsBusy = st.cumOperatorBusyTime / cfg.simulationTime;
+    m.carriedErlangs = st.carriedServiceTime / cfg.simulationTime;
     return m;
 }
 
-static Metrics ComputeWindowMetrics(const std::vector<CallRecord>& records, double windowStart, double windowEnd, int numOperators)
+// helper to count values in interval [start, end)
+static long CountInInterval(const std::vector<double>& times, double start, double end) {
+    long cnt = 0;
+    for (double t : times) if (t >= start && t < end) ++cnt;
+    return cnt;
+}
+
+// compute max operators busy during window using operatorUsageEvents
+static int ComputeMaxOperatorsBusy(const std::vector<std::pair<double, int>>& events, double windowStart, double windowEnd) {
+    int current = 0;
+    int maxbusy = 0;
+    // find last event <= windowStart to get initial state
+    for (const auto& ev : events) {
+        if (ev.first <= windowStart) current = ev.second;
+        else break;
+    }
+    maxbusy = current;
+    for (const auto& ev : events) {
+        if (ev.first >= windowEnd) break;
+        if (ev.first >= windowStart && ev.first < windowEnd) {
+            if (ev.second > maxbusy) maxbusy = ev.second;
+        }
+    }
+    return maxbusy;
+}
+
+static Metrics ComputeWindowMetrics(const RunState& st, double windowStart, double windowEnd, int numOperators)
 {
     Metrics m = {};
     long waitedCount = 0;
@@ -277,28 +343,72 @@ static Metrics ComputeWindowMetrics(const std::vector<CallRecord>& records, doub
     long countWaitGT360 = 0;
 
     long servedCalls = 0;
-    for (const auto& rec : records) {
+    double totalServiceTime = 0.0;
+
+    for (const auto& rec : st.callHistory) {
+        double serviceStart = rec.startTime + rec.waitingTime;
+        double serviceEnd = serviceStart + rec.serviceTime;
+
+        // tempo ocupado dentro da janela
+        double overlapStart = std::max(serviceStart, windowStart);
+        double overlapEnd = std::min(serviceEnd, windowEnd);
+        if (overlapEnd > overlapStart) busyTime += (overlapEnd - overlapStart);
+
+        // apenas para métricas de filas (contar chamadas cujo ARRIVAL está dentro da janela)
         if (rec.startTime >= windowStart && rec.startTime < windowEnd) {
             servedCalls++;
             sumWaitAll += rec.waitingTime;
+            totalServiceTime += rec.serviceTime;
             if (rec.waitingTime > 0.0) {
                 sumWaitWaited += rec.waitingTime;
                 waitedCount++;
             }
             if (rec.waitingTime > 360.0) countWaitGT360++;
-            busyTime += rec.serviceTime;
         }
     }
 
+    m.carriedErlangs = busyTime / (windowEnd - windowStart);
     m.totalCallsServed = servedCalls;
     m.avgWaitingAll = (servedCalls > 0) ? (sumWaitAll / servedCalls) : 0.0;
     m.avgWaitingWaited = (waitedCount > 0) ? (sumWaitWaited / waitedCount) : 0.0;
     m.probWaitGT360 = (servedCalls > 0) ? (double)countWaitGT360 / servedCalls : 0.0;
+
+    // utilização dos operadores correta (fração)
     m.operatorUtil = busyTime / (numOperators * (windowEnd - windowStart));
+
+    // Média de operadores ocupados no intervalo (operator-seconds / window length)
+    m.avgOperatorsBusy = busyTime / (windowEnd - windowStart);
+
     double arrivalsToWindow = (double)servedCalls / (windowEnd - windowStart);
     m.meanQueueSize = arrivalsToWindow * m.avgWaitingAll;
 
+    // arrivals and blocked in the window using recorded times
+    m.arrivalsInWindow = CountInInterval(st.arrivalTimes, windowStart, windowEnd);
+    m.blockedInWindow = CountInInterval(st.blockedTimes, windowStart, windowEnd);
+    m.servedInWindow = servedCalls;
+
+    // compute max operators busy during the window
+    m.maxOperatorsBusy = ComputeMaxOperatorsBusy(st.operatorUsageEvents, windowStart, windowEnd);
+
     return m;
+}
+
+static std::vector<Metrics> ComputeTimeSeries(
+    const RunState& st,
+    double simTime,
+    int numOperators,
+    double intervalSeconds)
+{
+    std::vector<Metrics> series;
+
+    for (double t = 0; t < simTime; t += intervalSeconds) {
+        double wStart = t;
+        double wEnd = t + intervalSeconds;
+
+        Metrics m = ComputeWindowMetrics(st, wStart, wEnd, numOperators);
+        series.push_back(m);
+    }
+    return series;
 }
 
 int main() {
@@ -314,8 +424,32 @@ int main() {
     RunState st;
     Metrics overall = RunSimulation(cfg, st, 12345u);
 
+    auto series = ComputeTimeSeries(st, cfg.simulationTime, cfg.numOperators, 60.0);
+
+    std::ofstream csv("stability_timeseries.csv");
+    // Header updated with extra useful columns
+    csv << "tempo;L(t);W_wait_avg_s;p_util;OperatorsBusyAvg;Arrivals;Blocked;Served;MaxOperatorsBusy;CarriedErlangs\n";
+
+    double t = 0;
+    for (auto& m : series) {
+        csv << t << ";"
+            << m.meanQueueSize << ";"
+            << m.avgWaitingAll << ";"
+            << m.operatorUtil << ";"
+            << m.avgOperatorsBusy << ";"
+            << m.arrivalsInWindow << ";"
+            << m.blockedInWindow << ";"
+            << m.servedInWindow << ";"
+            << m.maxOperatorsBusy << ";"
+            << m.carriedErlangs
+            << "\n";
+        t += 60.0;
+    }
+
+    csv.close();
+
     double windowStart = 12 * 3600.0, windowEnd = 13 * 3600.0;
-    Metrics wm = ComputeWindowMetrics(st.callHistory, windowStart, windowEnd, cfg.numOperators);
+    Metrics wm = ComputeWindowMetrics(st, windowStart, windowEnd, cfg.numOperators);
 
     std::cout << "Overall (24h) arrivals=" << overall.totalArrivals << " blocked=" << overall.blockedCalls
         << " served=" << overall.totalCallsServed << " operatorUtil=" << overall.operatorUtil << "\n\n";
@@ -326,6 +460,9 @@ int main() {
     std::cout << "  avg waiting waited = " << wm.avgWaitingWaited << " s (" << wm.avgWaitingWaited / 60.0 << " min)\n";
     std::cout << "  P(T>360s) = " << wm.probWaitGT360 << "\n";
     std::cout << "  served calls = " << wm.totalCallsServed << "\n";
+    std::cout << "  avg operators busy (window) = " << wm.avgOperatorsBusy << "\n";
+    std::cout << "  max operators busy (window) = " << wm.maxOperatorsBusy << "\n";
+    std::cout << "  arrivals (window) = " << wm.arrivalsInWindow << " blocked (window) = " << wm.blockedInWindow << "\n";
 
     return 0;
 }
