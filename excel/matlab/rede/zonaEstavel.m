@@ -57,7 +57,7 @@ xlim([0 24]);
 xticks(0:3:24);
 xlabel('Tempo [h]');
 ylabel(data_col);
-title('zona estável de erlangs');
+title('Zona estável de Erlang');
 
 for k = 1:length(start_stable)
     xpatch = tempo_h(start_stable(k):end_stable(k));
@@ -68,7 +68,7 @@ for k = 1:length(start_stable)
           'FaceAlpha', 0.6, 'EdgeColor', [0 0.35 0]);
 end
 
-legend('Erlangs', 'Zona Estável');
+legend('Variação de Erlang', 'Zona Estável');
 grid on;
 axis padded;
 

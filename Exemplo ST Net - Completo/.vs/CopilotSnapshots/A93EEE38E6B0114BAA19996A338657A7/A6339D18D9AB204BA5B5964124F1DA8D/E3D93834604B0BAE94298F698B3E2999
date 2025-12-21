@@ -1,0 +1,1030 @@
+﻿#include <iostream>
+#include <fstream>
+#include <queue>
+#include <vector>
+#include <cmath>
+#include <cstring>
+#include <limits>
+#include <cstdio>
+#include <utility>
+#include <algorithm>
+#include "CEvent.h"
+
+CEventManager eventManager;
+
+class CSwitch;
+
+struct CallData {
+    long callNumber;
+    int entrySwitch;
+    int route[4];
+    double startTime;
+    double serviceTime;
+    double serviceStartTime;
+};
+
+struct SwitchLink {
+    int numLines;
+    int occupiedLines;
+    double carriedCallsTime;
+    double carriedCallsTimeSq;
+    long carriedCallsCount;
+    CSwitch* pNextSwitch;
+};
+
+class CSwitch {
+    char name;
+    long blockedCalls;
+    long totalCalls;
+    int nLinks;
+    SwitchLink outLinks[2];
+    std::ofstream outFile;
+
+public:
+    CSwitch() : name('\0'), blockedCalls(0), totalCalls(0), nLinks(0) {
+        memset(&(outLinks), 0, sizeof(outLinks));
+    }
+
+    CSwitch(char cName, int nlines1, CSwitch* pSwitch1, int nlines2 = 0, CSwitch* pSwitch2 = nullptr)
+        : name(cName), blockedCalls(0), totalCalls(0), nLinks(nlines2 == 0 ? 1 : 2) {
+        memset(&(outLinks), 0, sizeof(outLinks));
+
+        outLinks[0].numLines = nlines1; outLinks[0].pNextSwitch = pSwitch1; outLinks[0].occupiedLines = 0;
+        outLinks[1].numLines = nlines2; outLinks[1].pNextSwitch = pSwitch2; outLinks[1].occupiedLines = 0;
+
+        char fileName[100]; snprintf(fileName, sizeof(fileName), "switch_%c_.txt", cName);
+        outFile.open(fileName, std::ofstream::out);
+    }
+
+    void Reset() {
+        blockedCalls = totalCalls = 0;
+        for (int i = 0; i < 2; i++) {
+            outLinks[i].occupiedLines = 0;
+            outLinks[i].carriedCallsTime = 0.0;
+            outLinks[i].carriedCallsTimeSq = 0.0;
+            outLinks[i].carriedCallsCount = 0;
+        }
+    }
+
+    bool RequestLine(int hop, int route[4]) {
+        totalCalls++;
+        for (int i = 0; i < nLinks; i++) {
+            if (outLinks[i].numLines == 0) continue;
+            if (outLinks[i].occupiedLines < outLinks[i].numLines) {
+                bool ok = true;
+                if (outLinks[i].pNextSwitch != nullptr) {
+                    ok = outLinks[i].pNextSwitch->RequestLine(hop + 1, route);
+                }
+                if (!ok) {
+                    // este ramo n�o conseguiu alocar recursivamente � tenta a pr�xima rota
+                    continue;
+                }
+                outLinks[i].occupiedLines++;
+                route[hop] = i;
+                return true;
+            }
+        }
+        blockedCalls++;
+        return false;
+    }
+
+    void ReleaseLine(int hop, CallData* pCall, double currentTime) {
+        double duration = currentTime - pCall->startTime;
+        int idx = pCall->route[hop];
+        if (outLinks[idx].pNextSwitch != nullptr)
+            outLinks[idx].pNextSwitch->ReleaseLine(hop + 1, pCall, currentTime);
+        if (outLinks[idx].occupiedLines > 0) outLinks[idx].occupiedLines--;
+        outLinks[idx].carriedCallsTime += duration;
+        outLinks[idx].carriedCallsTimeSq += duration * duration;
+        outLinks[idx].carriedCallsCount++;
+    }
+
+    // Getters para m�tricas de bloqueio
+    char getName() const { return name; }
+    long getBlockedCalls() const { return blockedCalls; }
+    long getTotalCalls() const { return totalCalls; }
+    double getBlockingProbability() const {
+        return (totalCalls > 0) ? (double)blockedCalls / totalCalls : 0.0;
+    }
+};
+
+CSwitch network[6];
+
+// Estrutura para armazenar m�tricas de bloqueio por comutador
+struct SwitchBlockingMetrics {
+    char name;
+    long totalCalls;
+    long blockedCalls;
+    double blockingProbability;
+};
+
+struct Config {
+    double bhca;
+    double holdTime;
+    int nLines_A_C, nLines_A_D, nLines_B_D, nLines_D_E, nLines_D_F;
+    int nLines_C_E, nLines_E_F, nLines_F_CC;
+    int numOperators;
+    double simulationTime;
+
+    // Propor��o de tr�fego por origem (A, B, C) - deve somar 1.0
+    double trafficRatio_A, trafficRatio_B, trafficRatio_C;
+
+    // Hora de ponta para an�lise (em segundos desde in�cio da simula��o)
+    double peakHourStart;
+    double peakHourEnd;
+
+    Config() : bhca(0.0), holdTime(0.0), nLines_A_C(0), nLines_A_D(0), nLines_B_D(0),
+        nLines_D_E(0), nLines_D_F(0), nLines_C_E(0), nLines_E_F(0), nLines_F_CC(0),
+        numOperators(0), simulationTime(0.0),
+        trafficRatio_A(0.33), trafficRatio_B(0.33), trafficRatio_C(0.34),
+        peakHourStart(12.0 * 3600.0), peakHourEnd(13.0 * 3600.0) {
+    }
+};
+
+struct Metrics {
+    long totalCallsServed, totalArrivals, blockedCalls;
+    double avgWaitingAll, avgWaitingWaited, operatorUtil, probWaitGT360, meanQueueSize, carriedErlangs;
+    double avgOperatorsBusy;
+    long arrivalsInWindow;
+    long blockedInWindow;
+    long servedInWindow;
+    int maxOperatorsBusy;
+
+    // M�tricas de bloqueio por comutador D, E, F
+    SwitchBlockingMetrics switchD, switchE, switchF;
+    double maxBlockingDiff; // Diferen�a m�xima de bloqueio entre D, E, F
+};
+
+struct CallRecord {
+    double startTime;
+    double waitingTime;
+    double serviceTime;
+};
+
+struct RunState {
+    Config cfg;
+    long totalCalls, blockedCalls, servedCallsCount, waitedCallsCount, countWaitGT360;
+    double carriedServiceTime, reqServiceTime, cumWaitingTimeAll, cumWaitingTimeWaited;
+    double lastEventTime, queueArea, cumOperatorBusyTime;
+    int busyOperators;
+    std::queue<CallData*> waitingQueue;
+    std::vector<CallRecord> callHistory;
+
+    std::vector<double> arrivalTimes;
+    std::vector<double> blockedTimes;
+    std::vector<std::pair<double, int>> operatorUsageEvents;
+
+    RunState() : cfg(), totalCalls(0), blockedCalls(0), servedCallsCount(0), waitedCallsCount(0),
+        countWaitGT360(0), carriedServiceTime(0.0), reqServiceTime(0.0),
+        cumWaitingTimeAll(0.0), cumWaitingTimeWaited(0.0), lastEventTime(0.0),
+        queueArea(0.0), cumOperatorBusyTime(0.0), busyOperators(0) {
+    }
+
+    void ResetSwitches() { for (int i = 0; i < 6; i++) network[i].Reset(); }
+};
+
+static float urand() { float u; do { u = ((float)rand()) / (float)RAND_MAX; } while (u == 0.0f || u >= 1.0f); return u; }
+static float expon(float media) { return (float)(-media * log(urand())); }
+
+static void UpdateQueueArea(RunState& st, double currentTime) {
+    if (currentTime > st.lastEventTime) {
+        st.queueArea += (double)(long)st.waitingQueue.size() * (currentTime - st.lastEventTime);
+        st.lastEventTime = currentTime;
+    }
+}
+
+static void InitNetwork(const Config& cfg) {
+    // Rede: A, B, C s�o origens (�ndices 0, 1, 2)
+    // D, E, F s�o comutadores intermedi�rios/destino (�ndices 3, 4, 5)
+    // F conecta ao Call Center (destino final - Ponto 4)
+    network[5] = CSwitch('F', cfg.nLines_F_CC, nullptr);
+    network[4] = CSwitch('E', cfg.nLines_E_F, &(network[5]));
+    network[3] = CSwitch('D', cfg.nLines_D_F, &(network[5]), cfg.nLines_D_E, &(network[4]));
+    network[2] = CSwitch('C', cfg.nLines_C_E, &(network[4]));
+    network[1] = CSwitch('B', cfg.nLines_B_D, &(network[3]));
+    network[0] = CSwitch('A', cfg.nLines_A_D, &(network[3]), cfg.nLines_A_C, &(network[2]));
+}
+
+// Seleciona o switch de entrada baseado nas propor��es de tr�fego
+static int SelectEntrySwitch(const Config& cfg) {
+    float r = urand();
+    if (r < cfg.trafficRatio_A) return 0;       // Switch A
+    if (r < cfg.trafficRatio_A + cfg.trafficRatio_B) return 1;  // Switch B
+    return 2;  // Switch C
+}
+
+static void InitializeRun(RunState& st, const Config& cfg, unsigned int seed) {
+    st.cfg = cfg; st.totalCalls = 0; st.blockedCalls = 0; st.carriedServiceTime = st.reqServiceTime = 0.0;
+    while (!st.waitingQueue.empty()) st.waitingQueue.pop();
+    st.busyOperators = st.servedCallsCount = st.waitedCallsCount = st.countWaitGT360 = 0;
+    st.cumWaitingTimeAll = st.cumWaitingTimeWaited = st.lastEventTime = st.queueArea = st.cumOperatorBusyTime = 0.0;
+    st.callHistory.clear();
+    st.arrivalTimes.clear();
+    st.blockedTimes.clear();
+    st.operatorUsageEvents.clear();
+    eventManager.Reset();
+    InitNetwork(cfg);
+    st.ResetSwitches();
+    srand(seed);
+    eventManager.AddEvent(new CEvent(expon(3600.0f / (float)cfg.bhca), SETUP));
+}
+
+static void RecordOperatorEvent(RunState& st, double time) {
+    st.operatorUsageEvents.push_back(std::make_pair(time, st.busyOperators));
+}
+
+// Calcula a taxa de chegada baseada na hora do dia (padrão de tráfego diário)
+static double GetArrivalRate(double currentTime, double bhcaPeak) {
+    // currentTime em segundos desde início da simulação
+    double hourOfDay = fmod(currentTime / 3600.0, 24.0); // Hora do dia (0-23.99)
+
+    // Padrão de tráfego típico de call center (percentagem do pico)
+    // Noite (0-7h): 5% do pico
+    // Manhã (7-12h): crescimento de 30% a 100%
+    // Pico (12-13h): 100%
+    // Tarde (13-18h): decrescimento de 90% a 60%
+    // Noite (18-24h): decrescimento de 50% a 5%
+
+    double trafficFactor;
+
+    if (hourOfDay < 7.0) {
+        trafficFactor = 0.05; // 5% durante a noite
+    }
+    else if (hourOfDay < 12.0) {
+        // Crescimento linear de 30% a 100% entre 7h e 12h
+        trafficFactor = 0.30 + (hourOfDay - 7.0) / 5.0 * 0.70;
+    }
+    else if (hourOfDay < 13.0) {
+        trafficFactor = 1.0; // 100% durante hora de ponta (12-13h)
+    }
+    else if (hourOfDay < 18.0) {
+        // Decrescimento linear de 90% a 60% entre 13h e 18h
+        trafficFactor = 0.90 - (hourOfDay - 13.0) / 5.0 * 0.30;
+    }
+    else if (hourOfDay < 22.0) {
+        // Decrescimento de 50% a 20% entre 18h e 22h
+        trafficFactor = 0.50 - (hourOfDay - 18.0) / 4.0 * 0.30;
+    }
+    else {
+        // Decrescimento de 20% a 5% entre 22h e 24h
+        trafficFactor = 0.20 - (hourOfDay - 22.0) / 2.0 * 0.15;
+    }
+
+    return bhcaPeak * trafficFactor;
+}
+
+static void SetupRun(RunState& st, CEvent* pEvent) {
+    // Calcula taxa de chegada baseada na hora do dia
+    double currentRate = GetArrivalRate(pEvent->m_time, st.cfg.bhca);
+    double interArrivalTime = (currentRate > 0) ? expon(3600.0f / (float)currentRate) : 3600.0f;
+
+    eventManager.AddEvent(new CEvent(pEvent->m_time + interArrivalTime, SETUP));
+
+    st.arrivalTimes.push_back(pEvent->m_time);
+
+    CallData* pNewCall = new CallData;
+    pNewCall->serviceTime = expon((float)st.cfg.holdTime);
+    pNewCall->startTime = pEvent->m_time;
+
+    // Seleciona origem baseado nas propor��es configuradas (Pontos 1(A), 2(B), 3(C))
+    pNewCall->entrySwitch = SelectEntrySwitch(st.cfg);
+
+    pNewCall->callNumber = st.totalCalls;
+    pNewCall->serviceStartTime = 0.0;
+    memset(pNewCall->route, 0, sizeof(pNewCall->route));
+
+    st.totalCalls++;
+    st.reqServiceTime += pNewCall->serviceTime;
+
+    if (network[pNewCall->entrySwitch].RequestLine(0, pNewCall->route)) {
+        UpdateQueueArea(st, pEvent->m_time);
+        if (st.busyOperators < st.cfg.numOperators) {
+            pNewCall->serviceStartTime = pEvent->m_time;
+            st.busyOperators++;
+            RecordOperatorEvent(st, pEvent->m_time);
+            st.cumOperatorBusyTime += pNewCall->serviceTime;
+            eventManager.AddEvent(new CEvent(pEvent->m_time + pNewCall->serviceTime, RELEASE, pNewCall));
+        }
+        else {
+            // Sistema de espera FIFO ideal com capacidade infinita (sem desist�ncias)
+            st.waitingQueue.push(pNewCall);
+        }
+    }
+    else {
+        st.blockedCalls++;
+        st.blockedTimes.push_back(pEvent->m_time);
+        delete pNewCall;
+    }
+}
+
+static void ReleaseRun(RunState& st, CEvent* pEvent) {
+    CallData* pCall = (CallData*)pEvent->GetData();
+    double currentTime = pEvent->m_time;
+
+    network[pCall->entrySwitch].ReleaseLine(0, pCall, currentTime);
+
+    st.carriedServiceTime += (currentTime - pCall->startTime);
+
+    if (st.busyOperators > 0) {
+        st.busyOperators--;
+        RecordOperatorEvent(st, currentTime);
+    }
+
+    double waiting = 0.0;
+    if (pCall->serviceStartTime > 0.0)
+        waiting = pCall->serviceStartTime - pCall->startTime;
+
+    st.cumWaitingTimeAll += waiting;
+    if (waiting > 0.0) {
+        st.cumWaitingTimeWaited += waiting;
+        st.waitedCallsCount++;
+    }
+    if (waiting > 360.0) st.countWaitGT360++;
+
+    st.callHistory.push_back({ pCall->startTime, waiting, pCall->serviceTime });
+
+    st.servedCallsCount++;
+
+    UpdateQueueArea(st, currentTime);
+
+    // Sem tempos de transi��o entre atendimentos - atendimento imediato
+    if (!st.waitingQueue.empty()) {
+        CallData* pNext = st.waitingQueue.front();
+        st.waitingQueue.pop();
+
+        pNext->serviceStartTime = currentTime;
+
+        st.busyOperators++;
+        RecordOperatorEvent(st, currentTime);
+        st.cumOperatorBusyTime += pNext->serviceTime;
+
+        eventManager.AddEvent(new CEvent(currentTime + pNext->serviceTime, RELEASE, pNext));
+    }
+
+    pEvent->SetData(nullptr);
+    delete pCall;
+}
+
+// Calcula m�tricas de bloqueio dos comutadores D, E, F
+static void ComputeSwitchBlockingMetrics(Metrics& m) {
+    // D = network[3], E = network[4], F = network[5]
+    m.switchD.name = network[3].getName();
+    m.switchD.totalCalls = network[3].getTotalCalls();
+    m.switchD.blockedCalls = network[3].getBlockedCalls();
+    m.switchD.blockingProbability = network[3].getBlockingProbability();
+
+    m.switchE.name = network[4].getName();
+    m.switchE.totalCalls = network[4].getTotalCalls();
+    m.switchE.blockedCalls = network[4].getBlockedCalls();
+    m.switchE.blockingProbability = network[4].getBlockingProbability();
+
+    m.switchF.name = network[5].getName();
+    m.switchF.totalCalls = network[5].getTotalCalls();
+    m.switchF.blockedCalls = network[5].getBlockedCalls();
+    m.switchF.blockingProbability = network[5].getBlockingProbability();
+
+    // Calcular diferen�a m�xima de probabilidade de bloqueio entre D, E, F
+    double pD = m.switchD.blockingProbability;
+    double pE = m.switchE.blockingProbability;
+    double pF = m.switchF.blockingProbability;
+
+    double diff1 = std::abs(pD - pE);
+    double diff2 = std::abs(pD - pF);
+    double diff3 = std::abs(pE - pF);
+
+    m.maxBlockingDiff = std::max({ diff1, diff2, diff3 }) * 100.0; // Em percentagem
+}
+
+static Metrics RunSimulation(const Config& cfg, RunState& st, unsigned int seed) {
+    InitializeRun(st, cfg, seed);
+
+    CEvent* pEvent = eventManager.NextEvent();
+    while (pEvent && pEvent->m_time < cfg.simulationTime) {
+        switch (pEvent->m_type) {
+        case SETUP: SetupRun(st, pEvent); break;
+        case RELEASE: ReleaseRun(st, pEvent); break;
+        }
+        delete pEvent;
+        pEvent = eventManager.NextEvent();
+    }
+
+    // Limpar evento restante se existir
+    if (pEvent) {
+        delete pEvent;
+    }
+
+    // Limpar chamadas que ficaram na fila de espera
+    while (!st.waitingQueue.empty()) {
+        CallData* pCall = st.waitingQueue.front();
+        st.waitingQueue.pop();
+        delete pCall;
+    }
+
+    Metrics m = {};
+    m.totalArrivals = st.totalCalls;
+    m.blockedCalls = st.blockedCalls;
+    m.totalCallsServed = st.servedCallsCount;
+    m.avgWaitingAll = (m.totalCallsServed > 0) ? st.cumWaitingTimeAll / m.totalCallsServed : 0.0;
+    m.avgWaitingWaited = (st.waitedCallsCount > 0) ? st.cumWaitingTimeWaited / st.waitedCallsCount : 0.0;
+    m.operatorUtil = st.cumOperatorBusyTime / (cfg.numOperators * cfg.simulationTime);
+    m.probWaitGT360 = (m.totalCallsServed > 0) ? (double)st.countWaitGT360 / m.totalCallsServed : 0.0;
+    double arrivalsToCC = (double)m.totalCallsServed / cfg.simulationTime;
+    m.meanQueueSize = arrivalsToCC * m.avgWaitingAll;
+    m.avgOperatorsBusy = st.cumOperatorBusyTime / cfg.simulationTime;
+    m.carriedErlangs = st.carriedServiceTime / cfg.simulationTime;
+
+    // Calcular m�tricas de bloqueio por comutador
+    ComputeSwitchBlockingMetrics(m);
+
+    return m;
+}
+
+static long CountInInterval(const std::vector<double>& times, double start, double end) {
+    long cnt = 0;
+    for (double t : times) if (t >= start && t < end) ++cnt;
+    return cnt;
+}
+
+static int ComputeMaxOperatorsBusy(const std::vector<std::pair<double, int>>& events, double windowStart, double windowEnd) {
+    int current = 0;
+    int maxbusy = 0;
+    for (const auto& ev : events) {
+        if (ev.first <= windowStart) current = ev.second;
+        else break;
+    }
+    maxbusy = current;
+    for (const auto& ev : events) {
+        if (ev.first >= windowEnd) break;
+        if (ev.first >= windowStart && ev.first < windowEnd) {
+            if (ev.second > maxbusy) maxbusy = ev.second;
+        }
+    }
+    return maxbusy;
+}
+
+static Metrics ComputeWindowMetrics(const RunState& st, double windowStart, double windowEnd, int numOperators)
+{
+    Metrics m = {};
+    long waitedCount = 0;
+    double sumWaitAll = 0.0;
+    double sumWaitWaited = 0.0;
+    double busyTime = 0.0;
+    long countWaitGT360 = 0;
+
+    long servedCalls = 0;
+    double totalServiceTime = 0.0;
+
+    std::vector<double> waitTimes;  // Para análise de percentis
+
+    for (const auto& rec : st.callHistory) {
+        double serviceStart = rec.startTime + rec.waitingTime;
+        double serviceEnd = serviceStart + rec.serviceTime;
+
+        double overlapStart = std::max(serviceStart, windowStart);
+        double overlapEnd = std::min(serviceEnd, windowEnd);
+        if (overlapEnd > overlapStart) busyTime += (overlapEnd - overlapStart);
+
+        if (rec.startTime >= windowStart && rec.startTime < windowEnd) {
+            servedCalls++;
+            sumWaitAll += rec.waitingTime;
+            totalServiceTime += rec.serviceTime;
+            waitTimes.push_back(rec.waitingTime);
+            if (rec.waitingTime > 0.0) {
+                sumWaitWaited += rec.waitingTime;
+                waitedCount++;
+            }
+            if (rec.waitingTime > 360.0) countWaitGT360++;
+        }
+    }
+
+    m.carriedErlangs = busyTime / (windowEnd - windowStart);
+    m.totalCallsServed = servedCalls;
+    m.avgWaitingAll = (servedCalls > 0) ? (sumWaitAll / servedCalls) : 0.0;
+    m.avgWaitingWaited = (waitedCount > 0) ? (sumWaitWaited / waitedCount) : 0.0;
+    m.probWaitGT360 = (servedCalls > 0) ? (double)countWaitGT360 / servedCalls : 0.0;
+
+    m.operatorUtil = busyTime / (numOperators * (windowEnd - windowStart));
+    m.avgOperatorsBusy = busyTime / (windowEnd - windowStart);
+
+    double arrivalsToWindow = (double)servedCalls / (windowEnd - windowStart);
+    m.meanQueueSize = arrivalsToWindow * m.avgWaitingAll;
+
+    m.arrivalsInWindow = CountInInterval(st.arrivalTimes, windowStart, windowEnd);
+    m.blockedInWindow = CountInInterval(st.blockedTimes, windowStart, windowEnd);
+    m.servedInWindow = servedCalls;
+
+    m.maxOperatorsBusy = ComputeMaxOperatorsBusy(st.operatorUsageEvents, windowStart, windowEnd);
+
+    return m;
+}
+
+static std::vector<Metrics> ComputeTimeSeries(
+    const RunState& st,
+    double simTime,
+    int numOperators,
+    double intervalSeconds)
+{
+    std::vector<Metrics> series;
+
+    for (double t = 0; t < simTime; t += intervalSeconds) {
+        double wStart = t;
+        double wEnd = t + intervalSeconds;
+
+        Metrics m = ComputeWindowMetrics(st, wStart, wEnd, numOperators);
+        series.push_back(m);
+    }
+    return series;
+}
+
+// Estrutura para armazenar uma configuração testada
+struct TrialResult {
+    int numOperators;
+    int nLines_A_D, nLines_A_C, nLines_B_D, nLines_C_E, nLines_D_E, nLines_D_F, nLines_E_F, nLines_F_CC;
+    double peakBlockingProb;
+    double probWaitLT360;
+    double maxBlockingDiff;
+    bool meetsAllObjectives;
+
+    void Print() const {
+        std::cout << "  Operadores: " << numOperators << std::endl;
+        std::cout << "    A->D: " << nLines_A_D << " | A->C: " << nLines_A_C
+            << " | B->D: " << nLines_B_D << " | C->E: " << nLines_C_E << std::endl;
+        std::cout << "    D->E: " << nLines_D_E << " | D->F: " << nLines_D_F
+            << " | E->F: " << nLines_E_F << " | F->CC: " << nLines_F_CC << std::endl;
+        std::cout << "    Bloqueio: " << (peakBlockingProb * 100.0) << "% "
+            << (peakBlockingProb <= 0.015 ? "[OK]" : "[FALHA]") << std::endl;
+        std::cout << "    ~50% <6min: " << (probWaitLT360 * 100.0) << "% "
+            << ((probWaitLT360 >= 0.47 && probWaitLT360 <= 0.53) ? "[OK]" : "[FALHA]") << std::endl;
+        std::cout << "    Diff D,E,F: " << maxBlockingDiff << "% "
+            << (maxBlockingDiff <= 0.5 ? "[OK]" : "[FALHA]") << std::endl;
+    }
+};
+
+// Função para executar uma simulação e avaliar resultados
+static TrialResult RunTrial(Config& cfg, unsigned int seed) {
+    RunState st;
+    Metrics overall = RunSimulation(cfg, st, seed);
+    Metrics peakHour = ComputeWindowMetrics(st, cfg.peakHourStart, cfg.peakHourEnd, cfg.numOperators);
+
+    long countWaitLT360_peak = peakHour.totalCallsServed - (long)(peakHour.probWaitGT360 * peakHour.totalCallsServed);
+    double probWaitLT360_peak = (peakHour.totalCallsServed > 0) ? (double)countWaitLT360_peak / peakHour.totalCallsServed : 0.0;
+    double peakBlockingProb = (peakHour.arrivalsInWindow > 0) ? (double)peakHour.blockedInWindow / peakHour.arrivalsInWindow : 0.0;
+
+    ComputeSwitchBlockingMetrics(overall);
+
+    TrialResult result;
+    result.numOperators = cfg.numOperators;
+    result.nLines_A_D = cfg.nLines_A_D;
+    result.nLines_A_C = cfg.nLines_A_C;
+    result.nLines_B_D = cfg.nLines_B_D;
+    result.nLines_C_E = cfg.nLines_C_E;
+    result.nLines_D_E = cfg.nLines_D_E;
+    result.nLines_D_F = cfg.nLines_D_F;
+    result.nLines_E_F = cfg.nLines_E_F;
+    result.nLines_F_CC = cfg.nLines_F_CC;
+    result.peakBlockingProb = peakBlockingProb;
+    result.probWaitLT360 = probWaitLT360_peak;
+    result.maxBlockingDiff = overall.maxBlockingDiff;
+
+    result.meetsAllObjectives = (peakBlockingProb <= 0.015) &&
+        (probWaitLT360_peak >= 0.47 && probWaitLT360_peak <= 0.53) &&  // 50% ± 3% tolerance
+        (overall.maxBlockingDiff <= 0.5);
+
+    return result;
+}
+
+// Função de otimização iterativa
+static Config OptimizeConfiguration(const Config& baseConfig) {
+    Config cfg = baseConfig;
+    std::vector<TrialResult> trials;
+
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "   INICIANDO OTIMIZACAO ITERATIVA" << std::endl;
+    std::cout << "========================================" << std::endl;
+    std::cout << "\nObjetivos:" << std::endl;
+    std::cout << "  1. Bloqueio <= 1.5%" << std::endl;
+    std::cout << "  2. ~50% chamadas atendidas < 6 min (47-53%)" << std::endl;
+    std::cout << "  3. Diferenca bloqueio D,E,F <= 0.5%" << std::endl;
+    std::cout << "\n";
+
+    // Fase 1: Ajustar linhas da rede para bloqueio
+    std::cout << "FASE 1: Ajustando linhas da rede..." << std::endl;
+    std::cout << "----------------------------------------" << std::endl;
+
+    bool blockingOk = false;
+    int iteration = 0;
+
+    while (!blockingOk && iteration < 100) {
+        iteration++;
+        std::cout << "\nIteracao " << iteration << ":" << std::endl;
+
+        TrialResult result = RunTrial(cfg, 12345u);
+        result.Print();
+        trials.push_back(result);
+
+        if (result.peakBlockingProb <= 0.015 && result.maxBlockingDiff <= 0.5) {
+            blockingOk = true;
+            std::cout << "  >> Bloqueio OK!" << std::endl;
+        }
+        else {
+            // Ajustar linhas baseado no problema
+            if (result.peakBlockingProb > 0.015) {
+                // Estratégia baseada na distribuição de tráfego
+                // Ponto 1 (A): 15%, Ponto 2 (B): 5%, Ponto 3 (C): 80%
+
+                int increment = (result.peakBlockingProb > 0.03) ? 8 : 5;
+
+                // Aumentar linhas de ENTRADA proporcionalmente ao tráfego
+                cfg.nLines_A_D += (increment * 15 / 100);  // 15% do incremento
+                cfg.nLines_A_C += (increment * 15 / 100 / 2);  // Metade para rota alternativa
+                cfg.nLines_B_D += (increment * 5 / 100);   // 5% do incremento
+                cfg.nLines_C_E += (increment * 80 / 100);  // 80% do incremento - maior parte
+
+                // Aumentar linhas intermediárias
+                cfg.nLines_D_E += (increment / 4);
+                cfg.nLines_D_F += (increment / 4);
+                cfg.nLines_E_F += (increment * 3 / 5);
+                cfg.nLines_F_CC += (increment * 3 / 5);
+
+                std::cout << "  >> Bloqueio alto (" << (result.peakBlockingProb * 100.0)
+                    << "%), aumentando linhas proporcionalmente..." << std::endl;
+            }
+            if (result.maxBlockingDiff > 0.5) {
+                // Balancear rotas alternativas
+                cfg.nLines_D_E += 2;
+                cfg.nLines_D_F += 2;
+                std::cout << "  >> Balanceando rotas D->E/F..." << std::endl;
+            }
+        }
+    }
+
+    if (!blockingOk) {
+        std::cout << "\nAVISO: Nao foi possivel atingir objetivo de bloqueio em 10 iteracoes!" << std::endl;
+        std::cout << "Continuando com melhor configuracao encontrada..." << std::endl;
+    }
+
+    // Fase 2: Ajustar operadores para tempo de espera
+    std::cout << "\n\nFASE 2: Ajustando numero de operadores..." << std::endl;
+    std::cout << "----------------------------------------" << std::endl;
+
+    // Estimar operadores baseado no tráfego oferecido
+    double offeredTraffic = cfg.bhca * cfg.holdTime / 3600.0;
+    std::cout << "Trafego oferecido: " << offeredTraffic << " Erlangs" << std::endl;
+    
+    // IMPORTANTE: Para ter 50% atendidas <6min (não 100%), 
+    // precisamos de MENOS operadores do que o tráfego oferecido
+    // Isto cria fila de espera controlada
+    cfg.numOperators = (int)(offeredTraffic * 0.85);  // Começar com 85% do tráfego
+    if (cfg.numOperators < 1) cfg.numOperators = 1;
+    
+    std::cout << "Operadores iniciais: " << cfg.numOperators << std::endl;
+
+    bool waitTimeOk = false;
+    int opIteration = 0;
+    double lastWaitProb = 0.0;
+
+    while (!waitTimeOk && opIteration < 20) {
+        opIteration++;
+        std::cout << "\nIteracao " << opIteration << ":" << std::endl;
+
+        TrialResult result = RunTrial(cfg, 12345u);
+        result.Print();
+        trials.push_back(result);
+
+        if (result.meetsAllObjectives) {
+            waitTimeOk = true;
+            std::cout << "  >> TODOS OS OBJETIVOS ATINGIDOS!" << std::endl;
+            break;
+        }
+
+        // Verificar se precisa ajustar bloqueio primeiro
+        if (result.peakBlockingProb > 0.015) {
+            std::cout << "  >> Bloqueio ainda alto, ajustando rede..." << std::endl;
+            cfg.nLines_C_E += 5;
+            cfg.nLines_E_F += 3;
+            cfg.nLines_F_CC += 3;
+            continue;
+        }
+
+        // Ajustar operadores para atingir EXATAMENTE 50% em <6min
+        // Quanto MENOS operadores, MAIOR o tempo de espera, MENOR % atendida rápido
+        if (result.probWaitLT360 > 0.50) {
+            // Muitas chamadas sendo atendidas rapidamente
+            // Precisamos REDUZIR operadores para AUMENTAR tempo de espera
+            double excess = result.probWaitLT360 - 0.50;
+            
+            if (excess > 0.30) {
+                // Muito rápido (>80%), reduzir agressivamente
+                std::cout << "  >> Atendimento muito rapido (" << (result.probWaitLT360 * 100.0)
+                    << "%), reduzindo 5 operadores..." << std::endl;
+                cfg.numOperators -= 5;
+            }
+            else if (excess > 0.15) {
+                // Rápido (>65%), reduzir moderadamente
+                std::cout << "  >> Atendimento rapido (" << (result.probWaitLT360 * 100.0)
+                    << "%), reduzindo 3 operadores..." << std::endl;
+                cfg.numOperators -= 3;
+            }
+            else if (excess > 0.05) {
+                // Ligeiramente rápido (>55%), reduzir pouco
+                std::cout << "  >> Atendimento acima do alvo (" << (result.probWaitLT360 * 100.0)
+                    << "%), reduzindo 2 operadores..." << std::endl;
+                cfg.numOperators -= 2;
+            }
+            else {
+                // Muito próximo (50-55%), ajuste fino
+                std::cout << "  >> Ajuste fino (" << (result.probWaitLT360 * 100.0)
+                    << "%), reduzindo 1 operador..." << std::endl;
+                cfg.numOperators -= 1;
+            }
+        }
+        else if (result.probWaitLT360 < 0.50) {
+            // Poucas chamadas sendo atendidas rapidamente
+            // Precisamos AUMENTAR operadores para REDUZIR tempo de espera
+            double deficit = 0.50 - result.probWaitLT360;
+            
+            if (deficit > 0.20) {
+                // Muito lento (<30%), aumentar agressivamente
+                std::cout << "  >> Atendimento muito lento (" << (result.probWaitLT360 * 100.0)
+                    << "%), aumentando 4 operadores..." << std::endl;
+                cfg.numOperators += 4;
+            }
+            else if (deficit > 0.10) {
+                // Lento (<40%), aumentar moderadamente
+                std::cout << "  >> Atendimento lento (" << (result.probWaitLT360 * 100.0)
+                    << "%), aumentando 3 operadores..." << std::endl;
+                cfg.numOperators += 3;
+            }
+            else if (deficit > 0.03) {
+                // Ligeiramente lento (<47%), aumentar pouco
+                std::cout << "  >> Atendimento abaixo do alvo (" << (result.probWaitLT360 * 100.0)
+                    << "%), aumentando 2 operadores..." << std::endl;
+                cfg.numOperators += 2;
+            }
+            else {
+                // Muito próximo (47-50%), ajuste fino
+                std::cout << "  >> Ajuste fino (" << (result.probWaitLT360 * 100.0)
+                    << "%), aumentando 1 operador..." << std::endl;
+                cfg.numOperators += 1;
+            }
+        }
+        else {
+            // Perfeito! Exatamente 50%
+            waitTimeOk = true;
+            std::cout << "  >> Configuracao ideal encontrada! (50% exatos)" << std::endl;
+        }
+
+        // Garantir mínimo de operadores
+        if (cfg.numOperators < 1) {
+            cfg.numOperators = 1;
+            std::cout << "  >> Limite minimo atingido (1 operador)!" << std::endl;
+        }
+
+        // Detectar convergência - se valor está oscilando em torno de 50%
+        if (opIteration > 5 && std::abs(result.probWaitLT360 - 0.50) < 0.03) {
+            std::cout << "  >> Convergiu para ~50%, finalizando..." << std::endl;
+            waitTimeOk = true;
+            break;
+        }
+
+        lastWaitProb = result.probWaitLT360;
+    }
+
+    if (!waitTimeOk) {
+        std::cout << "\nAVISO: Aproximacao da configuracao otima. Pode requerer ajuste manual." << std::endl;
+    }
+
+    // Resumo da otimização
+    std::cout << "\n\n========================================" << std::endl;
+    std::cout << "   RESUMO DA OTIMIZACAO" << std::endl;
+    std::cout << "========================================" << std::endl;
+    std::cout << "Total de iteracoes: " << trials.size() << std::endl;
+
+    // Encontrar melhor resultado
+    TrialResult best = trials[0];
+    for (const auto& t : trials) {
+        if (t.meetsAllObjectives) {
+            best = t;
+            break;
+        }
+        // Calcular score (quanto mais próximo dos objetivos, melhor)
+        double currentScore = std::abs(0.015 - best.peakBlockingProb) +
+            std::abs(0.50 - best.probWaitLT360) +
+            std::abs(0.0 - best.maxBlockingDiff / 100.0);
+        double trialScore = std::abs(0.015 - t.peakBlockingProb) +
+            std::abs(0.50 - t.probWaitLT360) +
+            std::abs(0.0 - t.maxBlockingDiff / 100.0);
+        if (trialScore < currentScore) best = t;
+    }
+
+    std::cout << "\nMelhor configuracao encontrada:" << std::endl;
+    best.Print();
+
+    cfg.numOperators = best.numOperators;
+    cfg.nLines_A_D = best.nLines_A_D;
+    cfg.nLines_A_C = best.nLines_A_C;
+    cfg.nLines_B_D = best.nLines_B_D;
+    cfg.nLines_C_E = best.nLines_C_E;
+    cfg.nLines_D_E = best.nLines_D_E;
+    cfg.nLines_D_F = best.nLines_D_F;
+    cfg.nLines_E_F = best.nLines_E_F;
+    cfg.nLines_F_CC = best.nLines_F_CC;
+
+    return cfg;
+}
+
+int main() {
+    Config cfg;
+
+    // ========================================
+    // DADOS DO GRUPO 2
+    // ========================================
+    cfg.bhca = 1560.0;      // Chamadas na hora de ponta (12:00-13:00)
+    cfg.holdTime = 100.0;   // Duração média do atendimento (segundos)
+
+    // Distribuição de tráfego: Ponto 1=15%, Ponto 2=5%, Ponto 3=80%
+    cfg.trafficRatio_A = 0.15;  // Ponto 1 -> Switch A
+    cfg.trafficRatio_B = 0.05;  // Ponto 2 -> Switch B
+    cfg.trafficRatio_C = 0.80;  // Ponto 3 -> Switch C
+
+    // ========================================
+    // DIMENSIONAMENTO INICIAL
+    // Baseado no tráfego oferecido e distribuição
+    // ========================================
+    cfg.nLines_A_D = 12;    // 15% do tráfego
+    cfg.nLines_A_C = 6;     // rota alternativa de A
+    cfg.nLines_B_D = 5;     // 5% do tráfego
+    cfg.nLines_C_E = 50;    // 80% do tráfego - principal rota
+    cfg.nLines_D_E = 12;
+    cfg.nLines_D_F = 15;
+    cfg.nLines_E_F = 55;
+    cfg.nLines_F_CC = 60;
+
+    cfg.numOperators = 35;  // Começar conservador para atingir 50% (não 100%)
+    cfg.simulationTime = 24 * 3600.0; // 24 horas completas
+    cfg.peakHourStart = 12.0 * 3600.0; // 12:00
+    cfg.peakHourEnd = 13.0 * 3600.0;   // 13:00
+
+    // ========================================
+    // OTIMIZAÇÃO AUTOMÁTICA
+    // ========================================
+    cfg = OptimizeConfiguration(cfg);
+
+    // ========================================
+    // SIMULAÇÃO FINAL COM CONFIGURAÇÃO OTIMIZADA
+    // ========================================
+    std::cout << "\n\n========================================" << std::endl;
+    std::cout << "   SIMULACAO FINAL" << std::endl;
+    std::cout << "========================================" << std::endl;
+
+    RunState st;
+    Metrics overall = RunSimulation(cfg, st, 12345u);
+
+    // Métricas da hora de ponta (12:00-13:00)
+    Metrics peakHour = ComputeWindowMetrics(st, cfg.peakHourStart, cfg.peakHourEnd, cfg.numOperators);
+
+    // Calcular métricas adicionais da hora de ponta
+    long countWaitLT360_peak = peakHour.totalCallsServed - (long)(peakHour.probWaitGT360 * peakHour.totalCallsServed);
+    double probWaitLT360_peak = (peakHour.totalCallsServed > 0) ? (double)countWaitLT360_peak / peakHour.totalCallsServed : 0.0;
+    double peakBlockingProb = (peakHour.arrivalsInWindow > 0) ? (double)peakHour.blockedInWindow / peakHour.arrivalsInWindow : 0.0;
+
+    // Métricas do dia completo
+    double globalBlockingProb = (overall.totalArrivals > 0) ? (double)overall.blockedCalls / overall.totalArrivals : 0.0;
+
+    // Gerar série temporal de 24h com intervalos de 1 minuto
+    auto series = ComputeTimeSeries(st, cfg.simulationTime, cfg.numOperators, 60.0);
+
+    std::ofstream csv("stability_timeseries.csv");
+    csv << "tempo;hora;L(t);W_wait_avg_s;p_util;OperatorsBusyAvg;Arrivals;Blocked;Served;MaxOperatorsBusy;CarriedErlangs\n";
+
+    double t = 0;
+    for (auto& m : series) {
+        double hourOfDay = fmod(t / 3600.0, 24.0);
+        csv << t << ";"
+            << hourOfDay << ";"
+            << m.meanQueueSize << ";"
+            << m.avgWaitingAll << ";"
+            << m.operatorUtil << ";"
+            << m.avgOperatorsBusy << ";"
+            << m.arrivalsInWindow << ";"
+            << m.blockedInWindow << ";"
+            << m.servedInWindow << ";"
+            << m.maxOperatorsBusy << ";"
+            << m.carriedErlangs
+            << "\n";
+        t += 60.0;
+    }
+    csv.close();
+
+    std::cout << "\n=== Dados de Entrada ===" << std::endl;
+    std::cout << "  Chamadas/hora ponta (12-13h): " << cfg.bhca << std::endl;
+    std::cout << "  Duracao media atendimento: " << cfg.holdTime << " s" << std::endl;
+    std::cout << "  Trafego oferecido (hora ponta): " << (cfg.bhca * cfg.holdTime / 3600.0) << " Erlangs" << std::endl;
+    std::cout << "  Distribuicao: Ponto1=" << (cfg.trafficRatio_A * 100) << "%, Ponto2="
+        << (cfg.trafficRatio_B * 100) << "%, Ponto3=" << (cfg.trafficRatio_C * 100) << "%" << std::endl;
+    std::cout << "  Tempo de simulacao: 24 horas" << std::endl;
+
+    std::cout << "\n=== Dimensionamento FINAL das Ligacoes ===" << std::endl;
+    std::cout << "  A->D: " << cfg.nLines_A_D << " linhas" << std::endl;
+    std::cout << "  A->C: " << cfg.nLines_A_C << " linhas" << std::endl;
+    std::cout << "  B->D: " << cfg.nLines_B_D << " linhas" << std::endl;
+    std::cout << "  C->E: " << cfg.nLines_C_E << " linhas [OTIMIZADO]" << std::endl;
+    std::cout << "  D->E: " << cfg.nLines_D_E << " linhas" << std::endl;
+    std::cout << "  D->F: " << cfg.nLines_D_F << " linhas" << std::endl;
+    std::cout << "  E->F: " << cfg.nLines_E_F << " linhas [OTIMIZADO]" << std::endl;
+    std::cout << "  F->CC: " << cfg.nLines_F_CC << " linhas [OTIMIZADO]" << std::endl;
+    std::cout << "  Operadores: " << cfg.numOperators << " [OTIMIZADO]" << std::endl;
+
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "   METRICAS DO DIA COMPLETO (24h)" << std::endl;
+    std::cout << "========================================" << std::endl;
+    std::cout << "  Chegadas totais: " << overall.totalArrivals << std::endl;
+    std::cout << "  Chamadas bloqueadas: " << overall.blockedCalls << std::endl;
+    std::cout << "  Chamadas servidas: " << overall.totalCallsServed << std::endl;
+    std::cout << "  Probabilidade bloqueio: " << (globalBlockingProb * 100.0) << "%" << std::endl;
+
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "   METRICAS HORA DE PONTA (12:00-13:00)" << std::endl;
+    std::cout << "========================================" << std::endl;
+    std::cout << "  Chegadas: " << peakHour.arrivalsInWindow << std::endl;
+    std::cout << "  Chamadas bloqueadas: " << peakHour.blockedInWindow << std::endl;
+    std::cout << "  Chamadas servidas: " << peakHour.totalCallsServed << std::endl;
+    std::cout << "  Probabilidade bloqueio: " << (peakBlockingProb * 100.0) << "%" << std::endl;
+
+    bool bloqueioOk = (peakBlockingProb <= 0.015);
+    std::cout << "    -> Objetivo <= 1.5%: " << (bloqueioOk ? "[OK]" : "[FALHA]") << std::endl;
+
+    // Calcular métricas de bloqueio por comutador
+    ComputeSwitchBlockingMetrics(overall);
+
+    std::cout << "\n=== Metricas de Bloqueio por Comutador (24h) ===" << std::endl;
+    std::cout << "  Switch D: " << overall.switchD.blockedCalls << "/" << overall.switchD.totalCalls
+        << " = " << (overall.switchD.blockingProbability * 100.0) << "%" << std::endl;
+    std::cout << "  Switch E: " << overall.switchE.blockedCalls << "/" << overall.switchE.totalCalls
+        << " = " << (overall.switchE.blockingProbability * 100.0) << "%" << std::endl;
+    std::cout << "  Switch F: " << overall.switchF.blockedCalls << "/" << overall.switchF.totalCalls
+        << " = " << (overall.switchF.blockingProbability * 100.0) << "%" << std::endl;
+
+    std::cout << "  Diferenca maxima bloqueio (D,E,F): " << overall.maxBlockingDiff << "%" << std::endl;
+    bool diffOk = (overall.maxBlockingDiff <= 0.5);
+    std::cout << "    -> Objetivo <= 0.5%: " << (diffOk ? "[OK]" : "[FALHA]") << std::endl;
+
+    std::cout << "\n=== Metricas do Call Center (Hora de Ponta) ===" << std::endl;
+    std::cout << "  Numero de operadores: " << cfg.numOperators << std::endl;
+    std::cout << "  Utilizacao operadores: " << (peakHour.operatorUtil * 100.0) << "%" << std::endl;
+    std::cout << "  Operadores ocupados (media): " << peakHour.avgOperatorsBusy << std::endl;
+    std::cout << "  Operadores ocupados (maximo): " << peakHour.maxOperatorsBusy << std::endl;
+    std::cout << "  Tempo espera media (todas): " << peakHour.avgWaitingAll << " s ("
+        << peakHour.avgWaitingAll / 60.0 << " min)" << std::endl;
+    std::cout << "  Tempo espera media (esperaram): " << peakHour.avgWaitingWaited << " s ("
+        << peakHour.avgWaitingWaited / 60.0 << " min)" << std::endl;
+    std::cout << "  Numero medio em fila: " << peakHour.meanQueueSize << std::endl;
+
+    std::cout << "\n=== Tempo de Espera (Hora de Ponta) ===" << std::endl;
+    std::cout << "  Atendidas em < 6 min: " << (probWaitLT360_peak * 100.0) << "%" << std::endl;
+    bool esperaOk = (probWaitLT360_peak >= 0.47 && probWaitLT360_peak <= 0.53);  // 50% ± 3%
+    std::cout << "    -> Objetivo ~50% (47-53%): " << (esperaOk ? "[OK]" : "[FALHA]") << std::endl;
+
+    // Análise detalhada de percentis de tempo de espera na hora de ponta
+    std::vector<double> peakWaitTimes;
+    for (const auto& rec : st.callHistory) {
+        if (rec.startTime >= cfg.peakHourStart && rec.startTime < cfg.peakHourEnd) {
+            peakWaitTimes.push_back(rec.waitingTime);
+        }
+    }
+
+    if (!peakWaitTimes.empty()) {
+        std::sort(peakWaitTimes.begin(), peakWaitTimes.end());
+
+        double p50 = peakWaitTimes[peakWaitTimes.size() * 50 / 100];
+        double p90 = peakWaitTimes[peakWaitTimes.size() * 90 / 100];
+        double p95 = peakWaitTimes[peakWaitTimes.size() * 95 / 100];
+        double p99 = peakWaitTimes[peakWaitTimes.size() * 99 / 100];
+        double maxWait = peakWaitTimes.back();
+
+        std::cout << "\n  Percentis de tempo de espera:" << std::endl;
+        std::cout << "    P50 (mediana): " << (p50 / 60.0) << " min" << std::endl;
+        std::cout << "    P90: " << (p90 / 60.0) << " min" << std::endl;
+        std::cout << "    P95: " << (p95 / 60.0) << " min" << std::endl;
+        std::cout << "    P99: " << (p99 / 60.0) << " min" << std::endl;
+        std::cout << "    Maximo: " << (maxWait / 60.0) << " min" << std::endl;
+    }
+
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "   RESUMO DOS OBJETIVOS (HORA DE PONTA)" << std::endl;
+    std::cout << "========================================" << std::endl;
+    std::cout << "  Bloqueio <= 1.5%:           " << (bloqueioOk ? "[OK]" : "[FALHOU]") << std::endl;
+    std::cout << "  ~50% atendidas < 6min:      " << (esperaOk ? "[OK]" : "[FALHOU]") << std::endl;
+    std::cout << "  Diff bloqueio D,E,F <= 0.5%: " << (diffOk ? "[OK]" : "[FALHOU]") << std::endl;
+
+    if (bloqueioOk && esperaOk && diffOk) {
+        std::cout << "\n  *** TODOS OS OBJETIVOS ATINGIDOS! ***" << std::endl;
+    }
+    else {
+        std::cout << "\n  *** ALGUNS OBJETIVOS NAO FORAM ATINGIDOS ***" << std::endl;
+    }
+
+    std::cout << "\n* Arquivo 'stability_timeseries.csv' gerado com metricas minuto a minuto de 24h" << std::endl;
+
+    return 0;
+}

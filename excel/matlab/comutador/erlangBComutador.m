@@ -16,8 +16,8 @@ xlim([0 24]);
 xticks(0:3:24);
 xlabel('Tempo [h]');
 ylabel('Probabilidade de Bloqueio');
-title(['Erlang B ao longo do tempo (C = ' num2str(C) ')']);
-legend('Simulação', 'Erlang B teórico', 'Location', 'best');
+title(['Bloqueio ao longo do tempo']);
+legend('Simulação', 'Bloqueio teórico', 'Location', 'best');
 grid on;
 axis padded;
 

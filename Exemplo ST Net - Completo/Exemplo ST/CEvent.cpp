@@ -1,0 +1,147 @@
+#include <cassert>
+#include <cstddef>
+#include "CEvent.h"
+
+CEvent::CEvent(double time, EventType type, void* pData)
+{
+	m_arrayPos = -1;
+	m_time = time;
+	m_type = type;
+
+	m_pData = pData;
+}
+
+CEventManager::CEventManager()
+{
+	Reset();
+}
+
+
+void CEventManager::Reset()
+{
+	while (!m_eventList.empty())
+	{
+		delete m_eventList.front();
+		m_eventList.pop_front();
+	}
+
+	m_Tmin = m_Tmax = 0;
+	for (int i = 0; i < ArraySize; i++)
+		m_positionArray[i] = m_eventList.end();
+}
+
+
+CEvent* CEventManager::NextEvent()
+{
+	CEvent* pEvent = m_eventList.front();
+	assert(pEvent->m_arrayPos >= 0 && pEvent->m_arrayPos < ArraySize);
+	if (m_positionArray[pEvent->m_arrayPos] == m_eventList.begin())
+		m_positionArray[pEvent->m_arrayPos] = m_eventList.end();
+
+	m_eventList.pop_front();
+	return pEvent;
+}
+
+
+void CEventManager::AddEvent(CEvent* pEvent)
+{
+	int index = 0;
+	POSITION searchPos, aux;
+	int arrayIndex;
+
+	if (m_eventList.empty())
+	{
+		m_eventList.push_front(pEvent);
+		pEvent->m_arrayPos = 0;
+		return;
+	}
+
+	m_Tmin = m_eventList.front()->m_time;
+
+	if (pEvent->m_time < m_Tmin)
+	{
+		m_Tmin = pEvent->m_time;
+		arrayIndex = 0;
+		m_positionArray[arrayIndex] = m_eventList.begin();
+	}
+	else if (pEvent->m_time > m_Tmax)
+	{
+		m_Tmax = pEvent->m_time;
+		arrayIndex = ArraySize - 1;
+		auto lastPos = m_eventList.end();
+		--lastPos;
+		m_positionArray[arrayIndex] = lastPos;
+	}
+	else
+	{
+		arrayIndex = (int)((pEvent->m_time - m_Tmin) * (ArraySize - 1) / (m_Tmax - m_Tmin));
+		assert(arrayIndex >= 0 && arrayIndex < ArraySize);
+	};
+
+	if (m_positionArray[arrayIndex] == m_eventList.end())
+	{
+		if (((float)arrayIndex) / ((float)ArraySize) > 0.5)
+		{
+			searchPos = m_eventList.end();
+			--searchPos;
+		}
+		else
+			searchPos = m_eventList.begin();
+	}
+	else
+		searchPos = m_positionArray[arrayIndex];
+
+	CEvent* ev = *searchPos;
+	if (ev->m_time >= pEvent->m_time) { //reverse search
+		if (searchPos != m_eventList.begin())
+			--searchPos;
+		
+		while (searchPos != m_eventList.end()) {
+			aux = searchPos;
+			ev = *searchPos;
+			if (ev->m_time <= pEvent->m_time) {
+				++aux;
+				searchPos = m_eventList.insert(aux, pEvent);
+				break;
+			}
+			if (searchPos == m_eventList.begin())
+			{
+				searchPos = m_eventList.insert(m_eventList.begin(), pEvent);
+				break;
+			}
+			--searchPos;
+			index--;
+		};
+		if (searchPos == m_eventList.end())
+			searchPos = m_eventList.insert(m_eventList.begin(), pEvent);
+	}
+	else {							//forward search
+		if (searchPos != m_eventList.end())
+			++searchPos;
+		
+		while (searchPos != m_eventList.end()) {
+			aux = searchPos;
+			ev = *searchPos;
+			index++;
+			if (ev->m_time >= pEvent->m_time) {
+				searchPos = m_eventList.insert(aux, pEvent);
+				break;
+			}
+			++searchPos;
+		}
+		if (searchPos == m_eventList.end())
+			searchPos = m_eventList.insert(m_eventList.end(), pEvent);
+	}
+
+	pEvent->m_arrayPos = arrayIndex;
+	m_positionArray[arrayIndex] = searchPos;
+}
+
+
+CEventManager::~CEventManager()
+{
+	while (!m_eventList.empty()) {
+		delete m_eventList.front();
+		m_eventList.pop_front();
+	}
+};
